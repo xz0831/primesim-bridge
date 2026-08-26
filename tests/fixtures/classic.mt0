@@ -1,0 +1,4 @@
+$DATA1 SOURCE='tb.sp' VERSION='Y-2026.03'
+.TITLE 'measure example'
+delay gain
+1.25n 2.5
