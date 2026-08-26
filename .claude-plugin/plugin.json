@@ -1,0 +1,7 @@
+{
+  "name": "primesim-bridge",
+  "version": "0.1.0",
+  "description": "Drive Synopsys PrimeSim (Pro/SPICE) from coding agents — companion plugin to virtuoso-bridge-lite: schematic in Virtuoso, simulation in PrimeSim",
+  "license": "MIT",
+  "keywords": ["primesim", "synopsys", "spice", "simulation", "eda", "analog", "virtuoso-bridge"]
+}
