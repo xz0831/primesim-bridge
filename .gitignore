@@ -5,3 +5,6 @@ dist/
 .pytest_cache/
 output/
 *.log
+
+# fixtures must always be committed (defect: *.log would eat log fixtures)
+!tests/fixtures/**
