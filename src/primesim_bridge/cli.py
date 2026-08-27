@@ -7,12 +7,14 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from . import _companion
 from . import runner as runner_module
-from .argv import PRO_MODES, build_primesim_argv, primesim_mode_args
+from .argv import PRO_MODES
+from .engines import EngineContext, get_profile
 from .parsers import (
     collect_outputs,
     parse_log,
@@ -54,7 +56,10 @@ def _parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("netlist")
-    run_parser.add_argument("--engine", choices=("spice", "pro"), default="spice")
+    run_parser.add_argument(
+        "--engine", choices=("spice", "pro", "hspice"), default="spice"
+    )
+    run_parser.add_argument("--binary")
     run_parser.add_argument("--runlvl", type=int)
     run_parser.add_argument("--mode", choices=sorted(PRO_MODES))
     run_parser.add_argument("-o", "--prefix")
@@ -86,43 +91,60 @@ def _default_prefix(netlist: str) -> str:
 
 def _run(args: argparse.Namespace) -> int:
     try:
-        engine_args = primesim_mode_args(
-            args.engine, runlvl=args.runlvl, mode=args.mode
-        )
+        profile = get_profile(args.engine)
         if args.dry_run:
-            argv = build_primesim_argv(
-                netlist=args.netlist,
-                prefix=args.prefix or _default_prefix(args.netlist),
-                engine_args=engine_args,
+            binary = (
+                args.binary
+                if args.binary is not None
+                else os.environ.get(profile.env_binary_var, profile.default_binary)
+            )
+            dry_options = {
+                "engine": args.engine,
+                "runlvl": args.runlvl,
+                "mode": args.mode,
+                "dry_run": True,
+            }
+            argv = profile.build_argv(EngineContext(
+                netlist=Path(args.netlist),
+                prefix=Path(args.prefix or _default_prefix(args.netlist)),
+                binary=binary,
+                options=dry_options,
+                extra_args=(),
+                include_files=(),
                 threads=args.threads,
                 waveform_format=args.waveform_format,
-                log_file=args.log_file,
-            )
+                log_file=Path(args.log_file) if args.log_file is not None else None,
+                safety=True,
+            ))
             print(shlex.join(argv))
             return 0
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
 
-    simulator_overrides: dict[str, Any] = {
-        "work_dir": Path.cwd(),
-        "timeout": args.timeout,
-    }
-    if args.remote:
-        simulator_overrides["remote"] = RemoteSpec(host=args.remote)
-    simulator = PrimeSimSimulator.from_env(**simulator_overrides)
-    options = {
-        "engine": args.engine,
-        "runlvl": args.runlvl,
-        "mode": args.mode,
-        "threads": args.threads,
-        "waveform_format": args.waveform_format,
-        "log_file": args.log_file,
-        "prefix": args.prefix,
-        "parse_waveforms": args.waveforms,
-    }
-    result = simulator.run_simulation(
-        Path(args.netlist), {key: value for key, value in options.items() if value is not None}
-    )
+        simulator_overrides: dict[str, Any] = {
+            "work_dir": Path.cwd(),
+            "timeout": args.timeout,
+        }
+        if args.binary is not None:
+            simulator_overrides["binary"] = args.binary
+        if args.remote:
+            simulator_overrides["remote"] = RemoteSpec(host=args.remote)
+        simulator = PrimeSimSimulator.from_env(**simulator_overrides)
+        options = {
+            "engine": args.engine,
+            "runlvl": args.runlvl,
+            "mode": args.mode,
+            "threads": args.threads,
+            "waveform_format": args.waveform_format,
+            "log_file": args.log_file,
+            "prefix": args.prefix,
+            "parse_waveforms": args.waveforms,
+        }
+        result = simulator.run_simulation(
+            Path(args.netlist),
+            {key: value for key, value in options.items() if value is not None},
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
     print(
         json.dumps(
             {
@@ -145,6 +167,16 @@ def _parse(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     signatures: list[str] = []
     rows = 0
+    alter_measures: dict[str, dict[str, Any]] = {}
+    alter_rows: dict[str, int] = {}
+    indexed_measures: dict[Path, int] = {}
+    for path in outputs["measure"]:
+        matches = list(
+            re.finditer(r"\.(?:mt|ma|ms|md|mc)(\d+)", path.name.lower())
+        )
+        if matches:
+            indexed_measures[path] = int(matches[-1].group(1))
+    minimum_index = min(indexed_measures.values(), default=None)
     for path in outputs["measure"]:
         name = path.name.lower()
         if name.endswith(".gzip"):
@@ -153,7 +185,17 @@ def _parse(args: argparse.Namespace) -> int:
             name = name[:-3]
         parsed = parse_measure_csv(path) if name.endswith(".csv") else parse_measure_ascii(path)
         warnings.extend(parsed.pop("_warnings", []))
-        rows = max(rows, int(parsed.pop("_rows", 0)))
+        parsed_rows = int(parsed.pop("_rows", 0))
+        rows = max(rows, parsed_rows)
+        measure_index = indexed_measures.get(path)
+        if (
+            minimum_index is not None
+            and measure_index is not None
+            and measure_index > minimum_index
+        ):
+            alter_measures[path.name] = dict(parsed)
+            if parsed_rows:
+                alter_rows[path.name] = parsed_rows
         data.update(parsed)
     for path in outputs["op"]:
         data.update(parse_op_ascii(path))
@@ -170,6 +212,10 @@ def _parse(args: argparse.Namespace) -> int:
     }
     if rows:
         metadata["_rows"] = rows
+    if alter_measures:
+        metadata["alter_measures"] = alter_measures
+    if alter_rows:
+        metadata["alter_rows"] = alter_rows
     print(
         json.dumps(
             {

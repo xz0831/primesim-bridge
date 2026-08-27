@@ -4,7 +4,7 @@ import csv
 import gzip
 import re
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Optional, Sequence, TextIO
 
 
 _NUMBER_RE = re.compile(
@@ -96,7 +96,7 @@ def parse_measure_ascii(path: Path) -> dict[str, Any]:
         value_rows = [line.split() for line in lines[3:]]
         if not names or not value_rows or any(len(row) != len(names) for row in value_rows):
             return {"raw_lines": raw_lines, "parse_confidence": "low"}
-        return _shape_rows(names, value_rows, failed_is_none=False)
+        return _shape_rows(names, value_rows, failed_is_none=True)
     except (OSError, UnicodeError):
         return {"raw_lines": [], "parse_confidence": "low"}
 
@@ -126,7 +126,9 @@ def _append_once(items: list[str], value: str) -> None:
         items.append(value)
 
 
-def parse_log_text(text: str) -> dict[str, list[str]]:
+def parse_log_text(
+    text: str, extra_signatures: Optional[Sequence[str]] = None
+) -> dict[str, list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     signatures: list[str] = []
@@ -135,6 +137,13 @@ def parse_log_text(text: str) -> dict[str, list[str]]:
     for line in text.splitlines():
         stripped = line.strip()
         if _ZERO_SUMMARY_RE.match(line):
+            continue
+        matched_extra_signature = False
+        for signature in extra_signatures or ():
+            if signature.lower() in line.lower():
+                _append_once(signatures, signature)
+                matched_extra_signature = True
+        if matched_extra_signature:
             continue
         if divergence_signature.lower() in line.lower():
             _append_once(signatures, divergence_signature)
@@ -150,9 +159,11 @@ def parse_log_text(text: str) -> dict[str, list[str]]:
     return {"errors": errors, "warnings": warnings, "signatures": signatures}
 
 
-def parse_log(path: Path) -> dict[str, list[str]]:
+def parse_log(
+    path: Path, extra_signatures: Optional[Sequence[str]] = None
+) -> dict[str, list[str]]:
     with _open_text(path) as handle:
-        return parse_log_text(handle.read())
+        return parse_log_text(handle.read(), extra_signatures=extra_signatures)
 
 
 def _without_compression_suffix(name: str) -> str:
@@ -164,19 +175,21 @@ def _without_compression_suffix(name: str) -> str:
     return lowered
 
 
-def _bucket_for(path: Path, *, convention_one: bool) -> str:
+def _bucket_for(
+    path: Path, *, convention_one: bool, prefix_name: str = ""
+) -> str:
     if convention_one:
         return "waveform"
     name = _without_compression_suffix(path.name)
-    if re.search(r"\.(?:mt|md|ma|mc)\d+(?:\.csv)?$", name) or re.search(
+    if re.search(r"\.(?:mt|ms|md|ma|mc)\d+(?:\.csv)?$", name) or re.search(
         r"\.meas(?:\.csv)?$", name
-    ):
+    ) or name == prefix_name.lower() + ".csv":
         return "measure"
-    if re.search(r"\.(?:pt|pd|pa)\d+$", name):
+    if re.search(r"\.(?:pt|pd|pa|printtr)\d+$", name):
         return "print"
     if re.search(r"\.op\d+$", name):
         return "op"
-    if name.endswith(".log"):
+    if name.endswith((".log", ".lis")):
         return "log"
     if name.endswith((".fsdb", ".wdf")) or re.search(
         r"\.(?:tr|sw|ac)\d+$", name
@@ -210,6 +223,8 @@ def collect_outputs(prefix: Path) -> dict[str, list[Path]]:
             for nested in sorted(path for path in candidate.rglob("*") if path.is_file()):
                 buckets["waveform"].append(nested)
             continue
-        bucket = _bucket_for(candidate, convention_one=False)
+        bucket = _bucket_for(
+            candidate, convention_one=False, prefix_name=prefix_name
+        )
         buckets[bucket].append(candidate)
     return buckets

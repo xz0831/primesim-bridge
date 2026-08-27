@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -10,8 +11,8 @@ from typing import Any, Callable, Dict, List, Optional
 from pydantic import BaseModel
 
 from . import _companion
-from .argv import build_primesim_argv, primesim_mode_args
-from .models import ExecutionStatus, SimulationResult, classify_exit
+from .engines import EngineContext, EngineProfile, get_profile
+from .models import ExecutionStatus, SimulationResult
 from .parsers import (
     collect_outputs,
     parse_log,
@@ -36,14 +37,6 @@ def _exec(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _has_aopt(extra_args: list[str], option_name: str) -> bool:
-    for index in range(len(extra_args) - 1):
-        if extra_args[index] == "-aopt":
-            if extra_args[index + 1].split("=", 1)[0] == option_name:
-                return True
-    return False
-
-
 def _wrap_env_setup(
     argv: list[str], env_setup: str | None, env_setup_shell: str
 ) -> list[str]:
@@ -62,12 +55,20 @@ def _merge_unique(target: list[str], additions: list[str]) -> None:
             target.append(addition)
 
 
+def _has_aopt(extra_args: tuple[str, ...], option_name: str) -> bool:
+    for index in range(len(extra_args) - 1):
+        if extra_args[index] == "-aopt":
+            if extra_args[index + 1].split("=", 1)[0] == option_name:
+                return True
+    return False
+
+
 class PrimeSimSimulator:
     def __init__(
         self,
         *,
         work_dir: Path,
-        binary: str = "primesim",
+        binary: Optional[str] = None,
         env_setup: str | None = None,
         env_setup_shell: str = "sh",
         timeout: int = 3600,
@@ -84,6 +85,7 @@ class PrimeSimSimulator:
         self.remote = remote
         self._run_counter = 0
         self.run_id_factory = run_id_factory or self._next_run_id
+        self._binary_from_primesim_env = False
 
     def _next_run_id(self) -> str:
         self._run_counter += 1
@@ -113,8 +115,11 @@ class PrimeSimSimulator:
             values["env_setup_shell"] = setup_shell
         if remote_host and remote_host.lower() != "localhost":
             values["remote"] = RemoteSpec(host=remote_host, user=remote_user or None)
+        binary_from_primesim_env = bool(binary) and "binary" not in overrides
         values.update(overrides)
-        return cls(**values)
+        simulator = cls(**values)
+        simulator._binary_from_primesim_env = binary_from_primesim_env
+        return simulator
 
     def _default_prefix(self, netlist: Path) -> Path:
         stem = netlist.stem
@@ -127,8 +132,18 @@ class PrimeSimSimulator:
         return run_dir / stem
 
     def _parse_artifacts(
-        self, prefix: Path, explicit_log: Path | None = None
-    ) -> tuple[dict[str, Any], list[str], list[str], list[str], dict[str, list[Path]]]:
+        self,
+        prefix: Path,
+        explicit_log: Path | None = None,
+        extra_signatures: tuple[str, ...] = (),
+    ) -> tuple[
+        dict[str, Any],
+        list[str],
+        list[str],
+        list[str],
+        dict[str, list[Path]],
+        dict[str, Any],
+    ]:
         outputs = collect_outputs(prefix)
         if explicit_log is not None and explicit_log.is_file():
             if explicit_log not in outputs["log"]:
@@ -138,6 +153,17 @@ class PrimeSimSimulator:
         errors: list[str] = []
         warnings: list[str] = []
         signatures: list[str] = []
+        alter_metadata: dict[str, Any] = {}
+        indexed_measures: dict[Path, int] = {}
+        for measure_path in outputs["measure"]:
+            matches = list(
+                re.finditer(
+                    r"\.(?:mt|ma|ms|md|mc)(\d+)", measure_path.name.lower()
+                )
+            )
+            if matches:
+                indexed_measures[measure_path] = int(matches[-1].group(1))
+        minimum_index = min(indexed_measures.values(), default=None)
         for measure_path in outputs["measure"]:
             uncompressed_name = measure_path.name.lower()
             if uncompressed_name.endswith(".gzip"):
@@ -150,18 +176,32 @@ class PrimeSimSimulator:
                 else parse_measure_ascii(measure_path)
             )
             _merge_unique(warnings, parsed.pop("_warnings", []))
-            if "_rows" in parsed:
-                row_count = parsed.pop("_rows")
+            alter_rows = parsed.pop("_rows", None)
+            measure_index = indexed_measures.get(measure_path)
+            if (
+                minimum_index is not None
+                and measure_index is not None
+                and measure_index > minimum_index
+            ):
+                alter_metadata.setdefault("alter_measures", {})[
+                    measure_path.name
+                ] = dict(parsed)
+                if alter_rows is not None:
+                    alter_metadata.setdefault("alter_rows", {})[
+                        measure_path.name
+                    ] = alter_rows
+            if alter_rows is not None:
+                row_count = alter_rows
                 data["_rows"] = max(int(data.get("_rows", 0)), int(row_count))
             data.update(parsed)
         for op_path in outputs["op"]:
             data.update(parse_op_ascii(op_path))
         for log_path in outputs["log"]:
-            parsed_log = parse_log(log_path)
+            parsed_log = parse_log(log_path, extra_signatures=extra_signatures)
             _merge_unique(errors, parsed_log["errors"])
             _merge_unique(warnings, parsed_log["warnings"])
             _merge_unique(signatures, parsed_log["signatures"])
-        return data, errors, warnings, signatures, outputs
+        return data, errors, warnings, signatures, outputs, alter_metadata
 
     @staticmethod
     def _serialized_outputs(outputs: dict[str, list[Path]]) -> dict[str, list[str]]:
@@ -176,7 +216,9 @@ class PrimeSimSimulator:
         argv: list[str],
         returncode: int | None,
         is_parallel_wait: bool,
-        dc_safety_injected: bool,
+        engine: str,
+        profile: EngineProfile,
+        engine_ctx: EngineContext,
         explicit_log: Path | None = None,
         remote_cmds: list[list[str]] | None = None,
         remote_dir: str | None = None,
@@ -185,8 +227,8 @@ class PrimeSimSimulator:
         forced_error: str | None = None,
         exception_error: str | None = None,
     ) -> SimulationResult:
-        data, errors, warnings, signatures, outputs = self._parse_artifacts(
-            prefix, explicit_log
+        data, errors, warnings, signatures, outputs, alter_metadata = self._parse_artifacts(
+            prefix, explicit_log, profile.log_signatures
         )
         metadata: dict[str, Any] = {
             "argv": argv,
@@ -195,24 +237,32 @@ class PrimeSimSimulator:
             "prefix": str(prefix),
             "log_signatures": signatures,
             "transport": transport,
+            "engine": engine,
         }
         if remote_cmds is not None:
             metadata["remote_cmds"] = remote_cmds
         if remote_dir is not None:
             metadata["remote_dir"] = remote_dir
+        metadata.update(alter_metadata)
         if "_rows" in data:
             metadata["_rows"] = data.pop("_rows")
 
         dc_signature = "DC not converged"
-        if dc_safety_injected and dc_signature in signatures:
-            promoted = [item for item in warnings if dc_signature.lower() in item.lower()]
+        dc_safety_injected = engine_ctx.safety and not _has_aopt(
+            engine_ctx.extra_args, "primesim_exit_dc_fail"
+        )
+        if (
+            profile.name == "primesim"
+            and dc_safety_injected
+            and dc_signature in signatures
+        ):
+            promoted = [
+                item for item in warnings if dc_signature.lower() in item.lower()
+            ]
             warnings = [
                 item for item in warnings if dc_signature.lower() not in item.lower()
             ]
-            if promoted:
-                _merge_unique(errors, promoted)
-            else:
-                _merge_unique(errors, [dc_signature])
+            _merge_unique(errors, promoted or [dc_signature])
 
         artifact_count = sum(len(paths) for paths in outputs.values())
         if timeout_error is not None:
@@ -226,16 +276,16 @@ class PrimeSimSimulator:
         elif is_parallel_wait:
             status = ExecutionStatus.FAILURE if errors else ExecutionStatus.SUCCESS
         else:
-            effective_returncode = returncode if returncode is not None else 1
-            exit_status, exit_error = classify_exit(effective_returncode)
-            if exit_status is ExecutionStatus.FAILURE:
-                if exit_error is not None:
-                    _merge_unique(errors, [exit_error])
-                status = ExecutionStatus.FAILURE
-            elif errors:
-                status = ExecutionStatus.PARTIAL
-            else:
-                status = ExecutionStatus.SUCCESS
+            log = {
+                "errors": errors,
+                "warnings": warnings,
+                "signatures": signatures,
+            }
+            status, extra_errors, extra_warnings = profile.classify(
+                returncode, log, bool(artifact_count), engine_ctx
+            )
+            _merge_unique(errors, extra_errors)
+            _merge_unique(warnings, extra_warnings)
         return SimulationResult(
             status=status,
             data=data,
@@ -317,88 +367,128 @@ class PrimeSimSimulator:
         run_dir = prefix.parent
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        engine_args = primesim_mode_args(
-            selected.get("engine", "spice"),
-            runlvl=selected.get("runlvl"),
-            mode=selected.get("mode"),
+        profile = get_profile(str(selected.get("engine", "spice")))
+        binary = (
+            self.binary
+            if self.binary is not None
+            and not (
+                self._binary_from_primesim_env and profile.name != "primesim"
+            )
+            else os.environ.get(profile.env_binary_var, profile.default_binary)
         )
         extra_args = list(selected.get("extra_args") or [])
         include_files = [Path(path) for path in selected.get("include_files") or []]
         is_parallel_wait = bool(selected.get("is_parallel_wait", False))
-        dc_safety_injected = not _has_aopt(extra_args, "primesim_exit_dc_fail")
         log_value = selected.get("log_file")
         waveform_format = selected.get("waveform_format")
         parse_waveforms = selected.get("parse_waveforms") is True
         waveview_script = selected.get("waveview_script") is True
+        safety = not selected.get("no_safety", False)
+
+        local_netlist = netlist.absolute()
+        local_prefix = prefix.absolute()
+
+        def context(
+            *,
+            context_netlist: Path,
+            context_prefix: Path,
+            context_includes: list[Path],
+            context_log: Path | None,
+        ) -> EngineContext:
+            return EngineContext(
+                netlist=context_netlist,
+                prefix=context_prefix,
+                binary=binary,
+                options=selected,
+                extra_args=tuple(extra_args),
+                include_files=tuple(context_includes),
+                threads=selected.get("threads"),
+                waveform_format=waveform_format,
+                log_file=context_log,
+                safety=safety,
+            )
 
         def finish_result(**kwargs: Any) -> SimulationResult:
             result = self._finish_result(**kwargs)
-            result = self._postprocess_waveforms(result, prefix, parse_waveforms)
-            return self._postprocess_waveview(result, prefix, netlist, waveview_script)
+            result = self._postprocess_waveforms(result, local_prefix, parse_waveforms)
+            return self._postprocess_waveview(
+                result, local_prefix, local_netlist, waveview_script
+            )
 
         if self.remote is None:
             include_destinations: list[Path] = []
             for include_file in include_files:
-                destination = netlist.parent / include_file.name
+                source = include_file.absolute()
+                destination = local_netlist.parent / include_file.name
                 if include_file.resolve() != destination.resolve():
-                    shutil.copy2(include_file, destination)
+                    shutil.copy2(source, destination)
                 include_destinations.append(destination)
-            local_extra_args = list(extra_args)
-            for destination in include_destinations:
-                local_extra_args.extend(["-afile", str(destination)])
-            argv = build_primesim_argv(
-                netlist=str(netlist),
-                prefix=str(prefix),
-                binary=self.binary,
-                log_file=str(log_value) if log_value is not None else None,
-                engine_args=engine_args,
-                threads=selected.get("threads"),
-                waveform_format=waveform_format,
-                extra_args=local_extra_args,
+            local_log = (
+                Path(log_value).absolute() if log_value is not None else None
             )
-            explicit_log = Path(log_value) if log_value is not None else None
-            if self.env_setup is None and shutil.which(self.binary) is None:
+            local_ctx = context(
+                context_netlist=local_netlist,
+                context_prefix=local_prefix,
+                context_includes=include_destinations,
+                context_log=local_log,
+            )
+            argv = profile.build_argv(local_ctx)
+            aux_paths: list[Path] = []
+            for name, content in profile.aux_files(local_ctx):
+                aux_path = local_prefix.parent / name
+                aux_path.write_text(content)
+                aux_paths.append(aux_path)
+            explicit_log = profile.log_path(local_ctx)
+            if self.env_setup is None and shutil.which(binary) is None:
                 return finish_result(
-                    prefix=prefix,
+                    prefix=local_prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
-                    dc_safety_injected=dc_safety_injected,
+                    engine=profile.name,
+                    profile=profile,
+                    engine_ctx=local_ctx,
                     explicit_log=explicit_log,
                     transport="local",
-                    forced_error=f"primesim executable not found: {self.binary}",
+                    forced_error=f"{profile.name} executable not found: {binary}",
                 )
             command = _wrap_env_setup(argv, self.env_setup, self.env_setup_shell)
             try:
                 completed = _exec(command, timeout=self.timeout)
             except FileNotFoundError:
                 return finish_result(
-                    prefix=prefix,
+                    prefix=local_prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
-                    dc_safety_injected=dc_safety_injected,
+                    engine=profile.name,
+                    profile=profile,
+                    engine_ctx=local_ctx,
                     explicit_log=explicit_log,
                     transport="local",
-                    forced_error=f"primesim executable not found: {self.binary}",
+                    forced_error=f"{profile.name} executable not found: {binary}",
                 )
             except subprocess.TimeoutExpired:
                 return finish_result(
-                    prefix=prefix,
+                    prefix=local_prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
-                    dc_safety_injected=dc_safety_injected,
+                    engine=profile.name,
+                    profile=profile,
+                    engine_ctx=local_ctx,
                     explicit_log=explicit_log,
                     transport="local",
                     timeout_error=f"timeout after {self.timeout}s",
                 )
             return finish_result(
-                prefix=prefix,
+                prefix=local_prefix,
                 argv=argv,
                 returncode=completed.returncode,
                 is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
+                engine=profile.name,
+                profile=profile,
+                engine_ctx=local_ctx,
                 explicit_log=explicit_log,
                 transport="local",
             )
@@ -410,20 +500,26 @@ class PrimeSimSimulator:
             if self.remote.user
             else self.remote.host
         )
-        remote_extra_args = list(extra_args)
-        for include_file in include_files:
-            remote_extra_args.extend(["-afile", include_file.name])
         remote_log = Path(log_value).name if log_value is not None else None
-        argv = build_primesim_argv(
-            netlist=netlist.name,
-            prefix=prefix.name,
-            binary=self.binary,
-            log_file=remote_log,
-            engine_args=engine_args,
-            threads=selected.get("threads"),
-            waveform_format=waveform_format,
-            extra_args=remote_extra_args,
+        local_log = local_prefix.parent / remote_log if remote_log else None
+        local_ctx = context(
+            context_netlist=local_netlist,
+            context_prefix=local_prefix,
+            context_includes=[path.absolute() for path in include_files],
+            context_log=local_log,
         )
+        argv_ctx = context(
+            context_netlist=Path(netlist.name),
+            context_prefix=Path(prefix.name),
+            context_includes=[Path(path.name) for path in include_files],
+            context_log=Path(remote_log) if remote_log else None,
+        )
+        argv = profile.build_argv(argv_ctx)
+        aux_paths: list[Path] = []
+        for name, content in profile.aux_files(local_ctx):
+            aux_path = local_prefix.parent / name
+            aux_path.write_text(content)
+            aux_paths.append(aux_path)
         remote_cmds: list[list[str]] = []
         use_companion = (
             "transport" in _companion.companion_info().capabilities
@@ -431,7 +527,7 @@ class PrimeSimSimulator:
         transport_name = (
             "companion-sshrunner" if use_companion else "openssh-subprocess"
         )
-        explicit_remote_log = run_dir / remote_log if remote_log else None
+        explicit_remote_log = profile.log_path(local_ctx)
 
         def remote_result(
             returncode: int | None,
@@ -441,11 +537,13 @@ class PrimeSimSimulator:
             exception_error: str | None = None,
         ) -> SimulationResult:
             return finish_result(
-                prefix=prefix,
+                prefix=local_prefix,
                 argv=argv,
                 returncode=returncode,
                 is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
+                engine=profile.name,
+                profile=profile,
+                engine_ctx=local_ctx,
                 explicit_log=explicit_remote_log,
                 remote_cmds=remote_cmds,
                 remote_dir=remote_dir,
@@ -497,7 +595,7 @@ class PrimeSimSimulator:
                     mkdir_returncode, forced_error="remote upload stage failed"
                 )
 
-            upload_files = [netlist, *include_files]
+            upload_files = [netlist, *include_files, *aux_paths]
             remote_targets = [f"{remote_dir}/{path.name}" for path in upload_files]
             remote_cmds.append(
                 ["companion", "put_batch", *remote_targets]
@@ -589,6 +687,7 @@ class PrimeSimSimulator:
             "scp",
             str(netlist),
             *(str(path) for path in include_files),
+            *(str(path) for path in aux_paths),
             f"{target}:{remote_dir}/",
         ]
         remote_cmds.append(upload)

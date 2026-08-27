@@ -59,9 +59,39 @@ EXIT_CODE_TABLE: Dict[int, str] = {
 }
 
 
+EXIT_CODES_HSPICE: Dict[int, str] = {
+    0: "Simulation succeeded",
+    1: "Simulation failed due to errors",
+    2: "PrimeSim HSPICE stopped due to lack of license",
+    3: "Interrupted (Ctrl+\\)",
+    6: "Aborted (SIGABRT, e.g. out of memory)",
+    8: "Floating-point exception",
+    11: "Segmentation fault",
+    15: "Terminated (UNIX kill)",
+    24: "CPU time limit exceeded",
+    28: "No space left on device (simulation cannot start)",
+    38: "Error writing to output file (simulation started)",
+    99: "Error during -dp distribution",
+    101: "Interrupted (Ctrl+C)",
+}
+
+
 def classify_exit(returncode: int) -> Tuple[ExecutionStatus, Optional[str]]:
     if returncode == 0:
         return ExecutionStatus.SUCCESS, None
     return ExecutionStatus.FAILURE, EXIT_CODE_TABLE.get(
         returncode, f"exit code {returncode}"
     )
+
+
+def classify_exit_hspice(returncode: int) -> Tuple[ExecutionStatus, Optional[str]]:
+    code = (
+        -returncode
+        if returncode < 0
+        else returncode - 128
+        if 128 < returncode < 160
+        else returncode
+    )
+    if code == 0:
+        return ExecutionStatus.SUCCESS, None
+    return ExecutionStatus.FAILURE, EXIT_CODES_HSPICE.get(code, f"exit code {code}")
