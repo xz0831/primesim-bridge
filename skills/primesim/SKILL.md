@@ -52,6 +52,15 @@ primesim-bridge parse runs/tb/tb             # re-parse existing artifacts
 | SPICE (**our default**) | `-spice` (auto) | `--runlvl 1..6` (default 4; 6 = most accurate) | verification, sign-off-ish runs |
 | Pro (FastSPICE) | `--engine pro` | `--mode prohd/promd/proxd/spicehd/spicemd/spicexd` | big mixed-signal, exploration |
 | **HSPICE** | `--engine hspice` | netlist-only (`.option runlvl`, default 5 — no CLI flag; `-hpp` does not exist in Y-2026) | HSPICE-qualified flows, Monte Carlo (`SWEEP MONTE=`) |
+| **XA** (FastSPICE) | `--engine xa` | `set_sim_level` / `-sim_mode` via netlist/command file | large mixed-signal; Linux-only — remote/LSF execution |
+
+XA specifics: dialect via `--dialect {hspice,spectre,eldo}` (hspice default);
+classification is log-first (`Error:` lines; exit codes are undocumented) with a
+multicore-only `Total Wall Time` success proxy. Safety injection is a `-c`
+command file forcing `set_meas_option -format hspice` — without it XA's native
+`.meas` is collected but stays unstructured (raw_lines). Never point `-o` at an
+existing directory (XA would scatter `xa.*` inside it); alter (`.a#`) measure
+aggregation is not yet supported (E2 limitation).
 
 HSPICE specifics: binary resolved via `--binary` / `VB_HSPICE_BIN` / `hspice`;
 classification is exit-code-first (documented table, signal codes normalized) plus
