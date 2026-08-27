@@ -110,10 +110,14 @@ the MC collection path; no MC-specific code needed in E1.
    engine-independent chain (timeout_error → forced_error → is_parallel_wait)
    is UNCHANGED and runs first. `returncode` may be None; profiles treat None as
    effective code 1 (current behavior). The primesim profile's classify reproduces
-   today's `classify_exit` + exit-0/log-errors logic EXACTLY; the DC-signature
-   promotion (`runner.py` `dc_signature`/`dc_safety_injected` block) MOVES into the
-   primesim profile's classify (hspice does no signature promotion) — outputs
-   byte-identical for primesim runs.
+   today's `classify_exit` + exit-0/log-errors logic EXACTLY.
+   **v2.1 amendment (resolves the filed blocker):** the DC-signature promotion is
+   log POST-PROCESSING, not classification — it STAYS in the runner exactly where
+   it is today, BEFORE the engine-independent status chain (that ordering is what
+   makes a parallel-wait run fail on the promoted error — pinned by
+   tests/test_lsf_pattern.py). Only change: it is guarded by
+   `profile.name == "primesim"` (plus the existing `dc_safety_injected` logic);
+   hspice performs no signature promotion. `classify` never promotes.
 3. **Binary resolution.** `PrimeSimSimulator(binary: Optional[str] = None)`;
    resolved per-run AFTER the profile is known: explicit ctor/CLI `--binary` (new
    flag) → `os.environ[profile.env_binary_var]` → `profile.default_binary`.
@@ -231,7 +235,7 @@ the MC collection path; no MC-specific code needed in E1.
 
 ## Deliverable 1 — `src/primesim_bridge/engines.py`
 Per Design decisions 1-8: contexts, protocol, primesim profile (extracted,
-behavior-identical — including the moved DC promotion), hspice profile, registry.
+behavior-identical; DC promotion stays in the runner per D2 v2.1), hspice profile, registry.
 Pure logic; no subprocess/filesystem.
 
 ## Deliverable 2 — runner refactor (`src/primesim_bridge/runner.py`)
