@@ -51,6 +51,19 @@ primesim-bridge parse runs/tb/tb             # re-parse existing artifacts
 |---|---|---|---|
 | SPICE (**our default**) | `-spice` (auto) | `--runlvl 1..6` (default 4; 6 = most accurate) | verification, sign-off-ish runs |
 | Pro (FastSPICE) | `--engine pro` | `--mode prohd/promd/proxd/spicehd/spicemd/spicexd` | big mixed-signal, exploration |
+| **HSPICE** | `--engine hspice` | netlist-only (`.option runlvl`, default 5 — no CLI flag; `-hpp` does not exist in Y-2026) | HSPICE-qualified flows, Monte Carlo (`SWEEP MONTE=`) |
+
+HSPICE specifics: binary resolved via `--binary` / `VB_HSPICE_BIN` / `hspice`;
+classification is exit-code-first (documented table, signal codes normalized) plus
+the `***** job concluded` banner double-check — exit 0 without the banner is
+flagged PARTIAL. Safety injection is `-include_first` with
+`.option measform=3` (CSV measures) + `.option measfail=1` (without measfail a
+failed measure silently reads `0.0e0`); suppress with `no_safety=True`.
+`include_files` ride `-include_last`. MC results arrive as multi-row measures
+(the normal sweep shape); alter runs land in `metadata["alter_measures"]`.
+Prefixes must not contain a period (HSPICE truncates the output root at the last
+`.`). LSF wrappers, remote SSH, and the WaveView handoff work identically to the
+other engines.
 
 The binary's OWN default is Pro (FastSPICE) — this bridge deliberately flips the
 default to `-spice` so verification runs don't silently downgrade accuracy. Unlike the
