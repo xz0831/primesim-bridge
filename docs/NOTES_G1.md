@@ -83,3 +83,19 @@ unstaged on `master`; no commit was created and nothing was pushed. The fake and
 installer have working-tree mode 100755, but their committed modes cannot be verified
 until the owner stages them. Per the blocker protocol, no alternate Git directory,
 index, or ref-writing workaround was attempted.
+
+## Owner-session verification results (2026-08-27)
+
+- Fresh venv (`pip install -e ".[dev]"`): base 116 passed / 4 skipped; identical under
+  `PSB_NO_COMPANION=1`.
+- Companion tier (real pin fb5af05f, version 0.8.0): 118 passed / 2 skipped — after
+  fixing one test-isolation defect ONLY reproducible with the real package installed:
+  cached real submodules in `sys.modules` leaked through the stubbed parent in
+  `install_stub_modules` (now purges `virtuoso_bridge*` first).
+- Live-SSH tier (host: studio2, macOS, /usr/bin/python3 3.9.6): 20 passed — both the
+  OpenSSH subprocess path (validating sanctioned amendments A/B on a real host) and the
+  companion SSHRunner path (round-trip incl. merge-survival, fake E2E) — after fixing a
+  second live-only test defect: the fake's remote binary path must be ABSOLUTE because
+  the runner executes `cd <run_dir> && <binary>` (home-relative path → exit 127).
+- Net: every G1 assurance tier is green; the only remaining unverified surface is real
+  PrimeSim behavior (G2 — see the checklists above and in NOTES_G0).

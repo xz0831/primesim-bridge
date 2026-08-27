@@ -57,6 +57,13 @@ def module(name, *, package=False, **attributes):
 def install_stub_modules(
     monkeypatch, *, ssh_runner=None, parser=None, resolver=None
 ):
+    # Purge every cached real companion module first: with the real package
+    # installed, a prior real-tier test leaves e.g. virtuoso_bridge.transport.ssh
+    # in sys.modules, and the probe's import_module would return that cached real
+    # submodule THROUGH the stubbed parent — granting capabilities the stub
+    # deliberately withholds (caught live 2026-08-27, companion tier).
+    for name in [k for k in sys.modules if k == "virtuoso_bridge" or k.startswith("virtuoso_bridge.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
     modules = {
         "virtuoso_bridge": module("virtuoso_bridge", package=True),
         "virtuoso_bridge.transport": module(
@@ -406,6 +413,12 @@ def test_companion_live_round_trip_and_fake_e2e(tmp_path, fake_primesim_path):
     fake_remote = f"{remote_dir}/fake_primesim.py"
     assert transport.put_batch([(fake_primesim_path, fake_remote)], 30) == 0
     assert transport.run(f"chmod +x {fake_remote}", 30)[0] == 0
+    # The runner executes `cd <run_dir> && <binary> ...`, so a home-relative
+    # binary path breaks after the cd (observed live: exit 127). Resolve the
+    # remote HOME and pass an absolute path.
+    rc, home_out, _ = transport.run("pwd", 30)
+    assert rc == 0 and home_out.strip()
+    fake_remote = f"{home_out.strip()}/{fake_remote}"
     if transport.run("command -v python3", 30)[0] != 0:
         pytest.skip("python3 is unavailable on remote host")
     deck = tmp_path / "live.sp"
