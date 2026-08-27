@@ -47,8 +47,8 @@ def test_profile_registry_aliases_and_unknown_value():
     assert get_profile("spice") is get_profile("pro")
     assert get_profile("spice").name == "primesim"
     assert get_profile("hspice").name == "hspice"
-    with pytest.raises(ValueError, match="spice, pro, hspice"):
-        get_profile("xa")
+    with pytest.raises(ValueError, match="spice, pro, hspice, xa"):
+        get_profile("nosuchengine")
 
 
 def test_primesim_argv_snapshot_and_pre_refactor_regression():

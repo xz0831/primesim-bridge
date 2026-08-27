@@ -57,8 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("netlist")
     run_parser.add_argument(
-        "--engine", choices=("spice", "pro", "hspice"), default="spice"
+        "--engine", choices=("spice", "pro", "hspice", "xa"), default="spice"
     )
+    run_parser.add_argument("--dialect", choices=("hspice", "spectre", "eldo"))
     run_parser.add_argument("--binary")
     run_parser.add_argument("--runlvl", type=int)
     run_parser.add_argument("--mode", choices=sorted(PRO_MODES))
@@ -102,6 +103,7 @@ def _run(args: argparse.Namespace) -> int:
                 "engine": args.engine,
                 "runlvl": args.runlvl,
                 "mode": args.mode,
+                "dialect": args.dialect,
                 "dry_run": True,
             }
             argv = profile.build_argv(EngineContext(
@@ -132,6 +134,7 @@ def _run(args: argparse.Namespace) -> int:
             "engine": args.engine,
             "runlvl": args.runlvl,
             "mode": args.mode,
+            "dialect": args.dialect,
             "threads": args.threads,
             "waveform_format": args.waveform_format,
             "log_file": args.log_file,

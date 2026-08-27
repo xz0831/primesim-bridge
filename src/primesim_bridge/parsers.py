@@ -185,13 +185,15 @@ def _bucket_for(
         r"\.meas(?:\.csv)?$", name
     ) or name == prefix_name.lower() + ".csv":
         return "measure"
+    if re.search(r"\.mt(?:\.csv)?$", name):
+        return "measure"
     if re.search(r"\.(?:pt|pd|pa|printtr)\d+$", name):
         return "print"
     if re.search(r"\.op\d+$", name):
         return "op"
     if name.endswith((".log", ".lis")):
         return "log"
-    if name.endswith((".fsdb", ".wdf")) or re.search(
+    if name.endswith((".fsdb", ".out", ".wdf", ".psf")) or re.search(
         r"\.(?:tr|sw|ac)\d+$", name
     ):
         return "waveform"

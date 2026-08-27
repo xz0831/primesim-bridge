@@ -20,6 +20,12 @@ HSPICE_AUX_CONTENT = (
     ".option measform=3\n"
     ".option measfail=1\n"
 )
+XA_WAVEFORM_FORMATS = {"fsdb", "out", "wdf", "psf", "tr0"}
+XA_AUX_NAME = "psb_xa.cmd"
+XA_AUX_CONTENT = (
+    "# injected by primesim-bridge\n"
+    "set_meas_option -format hspice\n"
+)
 
 
 @dataclass(frozen=True)
@@ -71,7 +77,13 @@ class PrimeSimProfile:
     env_binary_var: str = "VB_PRIMESIM_BIN"
     log_signatures: tuple[str, ...] = ()
 
+    @staticmethod
+    def _validate(ctx: EngineContext) -> None:
+        if ctx.options.get("dialect") is not None:
+            raise ValueError("dialect is only valid for engine xa")
+
     def build_argv(self, ctx: EngineContext) -> list[str]:
+        self._validate(ctx)
         engine_args = primesim_mode_args(
             str(ctx.options.get("engine", "spice")),
             runlvl=ctx.options.get("runlvl"),
@@ -131,6 +143,8 @@ class HspiceProfile:
 
     @staticmethod
     def _validate(ctx: EngineContext) -> None:
+        if ctx.options.get("dialect") is not None:
+            raise ValueError("dialect is only valid for engine xa")
         if ctx.options.get("runlvl") is not None or ctx.options.get("mode") is not None:
             raise ValueError(
                 "accuracy is netlist-only for hspice: use .option runlvl"
@@ -203,13 +217,112 @@ class HspiceProfile:
         return ExecutionStatus.SUCCESS, [], []
 
 
+@dataclass(frozen=True)
+class XaProfile:
+    name: str = "xa"
+    default_binary: str = "xa"
+    env_binary_var: str = "VB_XA_BIN"
+    log_signatures: tuple[str, ...] = ("Total Wall Time =",)
+
+    @staticmethod
+    def _validate(ctx: EngineContext) -> None:
+        if ctx.options.get("runlvl") is not None or ctx.options.get("mode") is not None:
+            raise ValueError(
+                "xa accuracy is set with set_sim_level / -sim_mode, not "
+                "runlvl/mode"
+            )
+        if ctx.log_file is not None:
+            raise ValueError("xa log is always <prefix>.log")
+        if ctx.include_files:
+            raise ValueError(
+                "xa has no CLI include-append mechanism (-I only adds a search "
+                "path) — use .include/.lib inside the netlist"
+            )
+        if ctx.prefix.exists() and ctx.prefix.is_dir():
+            raise ValueError(
+                "xa -o treats an existing directory as the output directory; "
+                "choose a prefix that is not a directory"
+            )
+
+    def build_argv(self, ctx: EngineContext) -> list[str]:
+        self._validate(ctx)
+        argv = [ctx.binary]
+        dialect = ctx.options.get("dialect")
+        if dialect in (None, "hspice"):
+            pass
+        elif dialect in {"spectre", "eldo"}:
+            argv.append(f"-{dialect}")
+        else:
+            raise ValueError("dialect must be one of: hspice, spectre, eldo")
+        argv.extend([str(ctx.netlist), "-o", str(ctx.prefix)])
+        if ctx.threads is not None:
+            argv.extend(["-mt", str(ctx.threads)])
+        if ctx.waveform_format is not None:
+            normalized_format = ctx.waveform_format.lower()
+            if normalized_format not in XA_WAVEFORM_FORMATS:
+                valid = ", ".join(sorted(XA_WAVEFORM_FORMATS))
+                raise ValueError(f"waveform_format must be one of: {valid}")
+            argv.extend(["-wavefmt", normalized_format])
+        if ctx.safety and not _has_option(ctx.extra_args, "-c"):
+            aux_ref = (
+                Path(XA_AUX_NAME)
+                if ctx.options.get("dry_run") is True
+                else ctx.prefix.parent / XA_AUX_NAME
+            )
+            argv.extend(["-c", str(aux_ref)])
+        argv.extend(ctx.extra_args)
+        return argv
+
+    def aux_files(self, ctx: EngineContext) -> list[tuple[str, str]]:
+        if not ctx.safety or _has_option(ctx.extra_args, "-c"):
+            return []
+        return [(XA_AUX_NAME, XA_AUX_CONTENT)]
+
+    def log_path(self, ctx: EngineContext) -> Path:
+        return Path(str(ctx.prefix) + ".log")
+
+    def classify(
+        self,
+        returncode: Optional[int],
+        log: Mapping[str, list],
+        has_artifacts: bool,
+        ctx: EngineContext,
+    ) -> tuple[ExecutionStatus, list[str], list[str]]:
+        del has_artifacts
+        if returncode is None:
+            return (
+                ExecutionStatus.FAILURE,
+                ["no exit code (process did not complete)"],
+                [],
+            )
+        if returncode != 0:
+            return ExecutionStatus.FAILURE, [f"exit code {returncode}"], []
+        status = (
+            ExecutionStatus.PARTIAL
+            if log["errors"]
+            else ExecutionStatus.SUCCESS
+        )
+        warnings: list[str] = []
+        if (
+            ctx.threads is not None
+            and self.log_signatures[0] not in log["signatures"]
+        ):
+            warnings.append(
+                "exit 0 but no 'Total Wall Time' end-of-log marker "
+                "(undocumented success proxy)"
+            )
+        return status, [], warnings
+
+
 PRIMESIM_PROFILE = PrimeSimProfile()
 HSPICE_PROFILE = HspiceProfile()
+XA_PROFILE = XaProfile()
 ENGINE_PROFILES: Mapping[str, EngineProfile] = MappingProxyType(
     {
         "spice": PRIMESIM_PROFILE,
         "pro": PRIMESIM_PROFILE,
         "hspice": HSPICE_PROFILE,
+        "xa": XA_PROFILE,
     }
 )
 
@@ -219,4 +332,4 @@ def get_profile(engine_option: str) -> EngineProfile:
     try:
         return ENGINE_PROFILES[normalized]
     except KeyError as exc:
-        raise ValueError("engine must be one of: spice, pro, hspice") from exc
+        raise ValueError("engine must be one of: spice, pro, hspice, xa") from exc
