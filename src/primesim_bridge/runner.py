@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from . import _companion
 from .argv import build_primesim_argv, primesim_mode_args
 from .models import ExecutionStatus, SimulationResult, classify_exit
 from .parsers import (
@@ -170,8 +171,11 @@ class PrimeSimSimulator:
         dc_safety_injected: bool,
         explicit_log: Path | None = None,
         remote_cmds: list[list[str]] | None = None,
+        remote_dir: str | None = None,
+        transport: str,
         timeout_error: str | None = None,
         forced_error: str | None = None,
+        exception_error: str | None = None,
     ) -> SimulationResult:
         data, errors, warnings, signatures, outputs = self._parse_artifacts(
             prefix, explicit_log
@@ -182,9 +186,12 @@ class PrimeSimSimulator:
             "output_files": self._serialized_outputs(outputs),
             "prefix": str(prefix),
             "log_signatures": signatures,
+            "transport": transport,
         }
         if remote_cmds is not None:
             metadata["remote_cmds"] = remote_cmds
+        if remote_dir is not None:
+            metadata["remote_dir"] = remote_dir
         if "_rows" in data:
             metadata["_rows"] = data.pop("_rows")
 
@@ -205,6 +212,8 @@ class PrimeSimSimulator:
             status = ExecutionStatus.PARTIAL if artifact_count else ExecutionStatus.FAILURE
         elif forced_error is not None:
             _merge_unique(errors, [forced_error])
+            if exception_error is not None:
+                _merge_unique(errors, [exception_error])
             status = ExecutionStatus.FAILURE
         elif is_parallel_wait:
             status = ExecutionStatus.FAILURE if errors else ExecutionStatus.SUCCESS
@@ -227,6 +236,43 @@ class PrimeSimSimulator:
             metadata=metadata,
         )
 
+    @staticmethod
+    def _postprocess_waveforms(
+        result: SimulationResult, prefix: Path, requested: bool
+    ) -> SimulationResult:
+        if not requested:
+            return result
+        try:
+            info = _companion.companion_info()
+            if "psf_ascii" not in info.capabilities:
+                _merge_unique(
+                    result.warnings,
+                    ["waveform parsing requested but companion package not available"],
+                )
+                return result
+            candidates = sorted(
+                directory
+                for directory in prefix.parent.iterdir()
+                if directory.is_dir()
+                and directory.name.startswith(prefix.name + "_")
+            )
+            waveforms: dict[str, Any] = {}
+            for directory in candidates:
+                envelope = _companion.parse_psf_dir(directory)
+                waveforms[str(directory)] = envelope
+                if envelope["empty"]:
+                    _merge_unique(
+                        result.warnings,
+                        [
+                            "waveform parsing produced no signals "
+                            "(PSF dialect mismatch is unverified — G2/R1)"
+                        ],
+                    )
+            result.metadata["waveforms"] = waveforms
+        except Exception as exc:
+            _merge_unique(result.warnings, [f"waveform parsing failed: {exc}"])
+        return result
+
     def run_simulation(
         self, netlist: Path, options: dict[str, Any] | None = None
     ) -> SimulationResult:
@@ -248,6 +294,11 @@ class PrimeSimSimulator:
         dc_safety_injected = not _has_aopt(extra_args, "primesim_exit_dc_fail")
         log_value = selected.get("log_file")
         waveform_format = selected.get("waveform_format")
+        parse_waveforms = selected.get("parse_waveforms") is True
+
+        def finish_result(**kwargs: Any) -> SimulationResult:
+            result = self._finish_result(**kwargs)
+            return self._postprocess_waveforms(result, prefix, parse_waveforms)
 
         if self.remote is None:
             include_destinations: list[Path] = []
@@ -271,49 +322,53 @@ class PrimeSimSimulator:
             )
             explicit_log = Path(log_value) if log_value is not None else None
             if self.env_setup is None and shutil.which(self.binary) is None:
-                return self._finish_result(
+                return finish_result(
                     prefix=prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
                     dc_safety_injected=dc_safety_injected,
                     explicit_log=explicit_log,
+                    transport="local",
                     forced_error=f"primesim executable not found: {self.binary}",
                 )
             command = _wrap_env_setup(argv, self.env_setup, self.env_setup_shell)
             try:
                 completed = _exec(command, timeout=self.timeout)
             except FileNotFoundError:
-                return self._finish_result(
+                return finish_result(
                     prefix=prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
                     dc_safety_injected=dc_safety_injected,
                     explicit_log=explicit_log,
+                    transport="local",
                     forced_error=f"primesim executable not found: {self.binary}",
                 )
             except subprocess.TimeoutExpired:
-                return self._finish_result(
+                return finish_result(
                     prefix=prefix,
                     argv=argv,
                     returncode=None,
                     is_parallel_wait=is_parallel_wait,
                     dc_safety_injected=dc_safety_injected,
                     explicit_log=explicit_log,
+                    transport="local",
                     timeout_error=f"timeout after {self.timeout}s",
                 )
-            return self._finish_result(
+            return finish_result(
                 prefix=prefix,
                 argv=argv,
                 returncode=completed.returncode,
                 is_parallel_wait=is_parallel_wait,
                 dc_safety_injected=dc_safety_injected,
                 explicit_log=explicit_log,
+                transport="local",
             )
 
         run_id = self.run_id_factory()
-        remote_dir = f"~/.primesim_bridge/runs/{run_id}"
+        remote_dir = f".primesim_bridge/runs/{run_id}"
         target = (
             f"{self.remote.user}@{self.remote.host}"
             if self.remote.user
@@ -334,6 +389,166 @@ class PrimeSimSimulator:
             extra_args=remote_extra_args,
         )
         remote_cmds: list[list[str]] = []
+        use_companion = (
+            "transport" in _companion.companion_info().capabilities
+        )
+        transport_name = (
+            "companion-sshrunner" if use_companion else "openssh-subprocess"
+        )
+        explicit_remote_log = run_dir / remote_log if remote_log else None
+
+        def remote_result(
+            returncode: int | None,
+            *,
+            timeout_error: str | None = None,
+            forced_error: str | None = None,
+            exception_error: str | None = None,
+        ) -> SimulationResult:
+            return finish_result(
+                prefix=prefix,
+                argv=argv,
+                returncode=returncode,
+                is_parallel_wait=is_parallel_wait,
+                dc_safety_injected=dc_safety_injected,
+                explicit_log=explicit_remote_log,
+                remote_cmds=remote_cmds,
+                remote_dir=remote_dir,
+                transport=transport_name,
+                timeout_error=timeout_error,
+                forced_error=forced_error,
+                exception_error=exception_error,
+            )
+
+        wrapped = _wrap_env_setup(argv, self.env_setup, self.env_setup_shell)
+        remote_command = f"cd {remote_dir} && {shlex.join(wrapped)}"
+
+        if use_companion:
+            try:
+                companion_transport = _companion.CompanionTransport(
+                    self.remote.host,
+                    self.remote.user,
+                    self.timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return remote_result(
+                    None, timeout_error=f"timeout after {self.timeout}s"
+                )
+            except Exception as exc:
+                return remote_result(
+                    None,
+                    forced_error="remote upload stage failed",
+                    exception_error=str(exc),
+                )
+
+            mkdir_record = ["companion", "mkdir", remote_dir]
+            remote_cmds.append(mkdir_record)
+            try:
+                mkdir_returncode, _, _ = companion_transport.run(
+                    f"mkdir -p {remote_dir}", self.timeout
+                )
+            except subprocess.TimeoutExpired:
+                return remote_result(
+                    None, timeout_error=f"timeout after {self.timeout}s"
+                )
+            except Exception as exc:
+                return remote_result(
+                    None,
+                    forced_error="remote upload stage failed",
+                    exception_error=str(exc),
+                )
+            if mkdir_returncode != 0:
+                return remote_result(
+                    mkdir_returncode, forced_error="remote upload stage failed"
+                )
+
+            upload_files = [netlist, *include_files]
+            remote_targets = [f"{remote_dir}/{path.name}" for path in upload_files]
+            remote_cmds.append(
+                ["companion", "put_batch", *remote_targets]
+            )
+            try:
+                upload_returncode = companion_transport.put_batch(
+                    list(zip(upload_files, remote_targets)), self.timeout
+                )
+            except subprocess.TimeoutExpired:
+                return remote_result(
+                    None, timeout_error=f"timeout after {self.timeout}s"
+                )
+            except Exception as exc:
+                return remote_result(
+                    None,
+                    forced_error="remote upload stage failed",
+                    exception_error=str(exc),
+                )
+            if upload_returncode != 0:
+                return remote_result(
+                    upload_returncode, forced_error="remote upload stage failed"
+                )
+
+            remote_cmds.append(["companion", "run", remote_command])
+            simulation_returncode: int | None = None
+            simulation_timeout = False
+            ssh_stage_failure = False
+            ssh_exception: str | None = None
+            try:
+                simulation_returncode, _, _ = companion_transport.run(
+                    remote_command, self.timeout
+                )
+                ssh_stage_failure = simulation_returncode == 255
+            except subprocess.TimeoutExpired:
+                simulation_timeout = True
+            except Exception as exc:
+                ssh_stage_failure = True
+                ssh_exception = str(exc)
+
+            remote_cmds.append(
+                ["companion", "get_dir", remote_dir, str(run_dir)]
+            )
+            try:
+                download_returncode = companion_transport.get_dir(
+                    remote_dir, run_dir, self.timeout
+                )
+            except subprocess.TimeoutExpired:
+                return remote_result(
+                    simulation_returncode,
+                    timeout_error=f"timeout after {self.timeout}s",
+                )
+            except Exception as exc:
+                return remote_result(
+                    simulation_returncode,
+                    forced_error="remote download stage failed",
+                    exception_error=str(exc),
+                )
+            if download_returncode != 0:
+                return remote_result(
+                    simulation_returncode,
+                    forced_error="remote download stage failed",
+                )
+            if simulation_timeout:
+                return remote_result(
+                    None, timeout_error=f"timeout after {self.timeout}s"
+                )
+            if ssh_stage_failure:
+                return remote_result(
+                    simulation_returncode,
+                    forced_error="remote ssh stage failed",
+                    exception_error=ssh_exception,
+                )
+            return remote_result(simulation_returncode)
+
+        mkdir = ["ssh", target, f"mkdir -p {remote_dir}"]
+        remote_cmds.append(mkdir)
+        try:
+            mkdir_result = _exec(mkdir, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            return remote_result(None, timeout_error=f"timeout after {self.timeout}s")
+        except FileNotFoundError:
+            return remote_result(None, forced_error="remote upload stage failed")
+        if mkdir_result.returncode != 0:
+            return remote_result(
+                mkdir_result.returncode, forced_error="remote upload stage failed"
+            )
+
         upload = [
             "scp",
             str(netlist),
@@ -344,38 +559,14 @@ class PrimeSimSimulator:
         try:
             upload_result = _exec(upload, timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=None,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                remote_cmds=remote_cmds,
-                timeout_error=f"timeout after {self.timeout}s",
-            )
+            return remote_result(None, timeout_error=f"timeout after {self.timeout}s")
         except FileNotFoundError:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=None,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                remote_cmds=remote_cmds,
-                forced_error="remote upload stage failed",
-            )
+            return remote_result(None, forced_error="remote upload stage failed")
         if upload_result.returncode != 0:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=upload_result.returncode,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                remote_cmds=remote_cmds,
-                forced_error="remote upload stage failed",
+            return remote_result(
+                upload_result.returncode, forced_error="remote upload stage failed"
             )
 
-        wrapped = _wrap_env_setup(argv, self.env_setup, self.env_setup_shell)
-        remote_command = f"cd {remote_dir} && {shlex.join(wrapped)}"
         ssh = ["ssh", target, remote_command]
         remote_cmds.append(ssh)
         simulation_returncode: int | None = None
@@ -395,66 +586,24 @@ class PrimeSimSimulator:
         try:
             download_result = _exec(download, timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=simulation_returncode,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                explicit_log=run_dir / remote_log if remote_log else None,
-                remote_cmds=remote_cmds,
-                timeout_error=f"timeout after {self.timeout}s",
+            return remote_result(
+                simulation_returncode, timeout_error=f"timeout after {self.timeout}s"
             )
         except FileNotFoundError:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=simulation_returncode,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                explicit_log=run_dir / remote_log if remote_log else None,
-                remote_cmds=remote_cmds,
+            return remote_result(
+                simulation_returncode,
                 forced_error="remote download stage failed",
             )
         if download_result.returncode != 0:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=simulation_returncode,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                explicit_log=run_dir / remote_log if remote_log else None,
-                remote_cmds=remote_cmds,
+            return remote_result(
+                simulation_returncode,
                 forced_error="remote download stage failed",
             )
         if simulation_timeout:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=None,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                explicit_log=run_dir / remote_log if remote_log else None,
-                remote_cmds=remote_cmds,
-                timeout_error=f"timeout after {self.timeout}s",
-            )
+            return remote_result(None, timeout_error=f"timeout after {self.timeout}s")
         if ssh_stage_failure:
-            return self._finish_result(
-                prefix=prefix,
-                argv=argv,
-                returncode=simulation_returncode,
-                is_parallel_wait=is_parallel_wait,
-                dc_safety_injected=dc_safety_injected,
-                explicit_log=run_dir / remote_log if remote_log else None,
-                remote_cmds=remote_cmds,
+            return remote_result(
+                simulation_returncode,
                 forced_error="remote ssh stage failed",
             )
-        return self._finish_result(
-            prefix=prefix,
-            argv=argv,
-            returncode=simulation_returncode,
-            is_parallel_wait=is_parallel_wait,
-            dc_safety_injected=dc_safety_injected,
-            explicit_log=run_dir / remote_log if remote_log else None,
-            remote_cmds=remote_cmds,
-        )
+        return remote_result(simulation_returncode)

@@ -230,6 +230,8 @@ def test_default_prefix_uniquifies_directory_only(tmp_path, monkeypatch):
 
 
 def test_remote_sequence_and_argv_shapes(tmp_path, monkeypatch):
+    monkeypatch.setenv("PSB_NO_COMPANION", "1")
+    runner._companion.reset_cache()
     netlist = make_netlist(tmp_path)
     include = tmp_path / "model.inc"
     include.write_text("* model\n")
@@ -248,34 +250,48 @@ def test_remote_sequence_and_argv_shapes(tmp_path, monkeypatch):
         run_id_factory=lambda: "fixed-run",
     )
     result = simulator.run_simulation(netlist, {"include_files": [include]})
-    assert [call[0] for call in calls] == ["scp", "ssh", "scp"]
+    assert [call[0] for call in calls] == ["ssh", "scp", "ssh", "scp"]
     assert calls[0] == [
+        "ssh",
+        "alice@compute",
+        "mkdir -p .primesim_bridge/runs/fixed-run",
+    ]
+    assert calls[1] == [
         "scp",
         str(netlist),
         str(include),
-        "alice@compute:~/.primesim_bridge/runs/fixed-run/",
+        "alice@compute:.primesim_bridge/runs/fixed-run/",
     ]
-    assert calls[1][0:2] == ["ssh", "alice@compute"]
-    assert calls[1][2].startswith("cd ~/.primesim_bridge/runs/fixed-run && primesim -spice tb.sp")
-    assert calls[2] == [
+    assert calls[2][0:2] == ["ssh", "alice@compute"]
+    assert calls[2][2].startswith("cd .primesim_bridge/runs/fixed-run && primesim -spice tb.sp")
+    assert calls[3] == [
         "scp",
         "-r",
-        "alice@compute:~/.primesim_bridge/runs/fixed-run/.",
+        "alice@compute:.primesim_bridge/runs/fixed-run/.",
         str(tmp_path / "runs" / "tb"),
     ]
     assert result.metadata["argv"][-2:] == ["-afile", "model.inc"]
     assert result.metadata["remote_cmds"] == calls
+    assert result.metadata["remote_dir"] == ".primesim_bridge/runs/fixed-run"
+    assert result.metadata["transport"] == "openssh-subprocess"
     assert result.status is ExecutionStatus.SUCCESS
 
 
 def test_remote_upload_failure_names_stage(tmp_path, monkeypatch):
     netlist = make_netlist(tmp_path)
-    monkeypatch.setattr(
-        runner, "_exec", lambda argv, *, timeout: completed(argv, returncode=1)
-    )
+    monkeypatch.setenv("PSB_NO_COMPANION", "1")
+    runner._companion.reset_cache()
+    calls = []
+
+    def fake_exec(argv, *, timeout):
+        calls.append(argv)
+        return completed(argv, returncode=0 if len(calls) == 1 else 1)
+
+    monkeypatch.setattr(runner, "_exec", fake_exec)
     result = PrimeSimSimulator(
         work_dir=tmp_path / "runs", remote=RemoteSpec(host="compute")
     ).run_simulation(netlist)
     assert result.status is ExecutionStatus.FAILURE
     assert "remote upload stage failed" in result.errors
-    assert len(result.metadata["remote_cmds"]) == 1
+    assert len(result.metadata["remote_cmds"]) == 2
+    assert result.metadata["remote_cmds"][0][2].startswith("mkdir -p ")

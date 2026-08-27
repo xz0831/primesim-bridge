@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from primesim_bridge import cli
+from primesim_bridge.models import ExecutionStatus, SimulationResult
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -48,8 +49,41 @@ def test_parse_subcommand_on_fixture_artifacts(tmp_path, capsys):
 
 
 def test_status_never_raises_without_tools(monkeypatch, capsys):
+    monkeypatch.setenv("PSB_NO_COMPANION", "1")
+    cli._companion.reset_cache()
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert cli.main(["status"]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["primesim"] is None
     assert output["license_tokens"] == []
+    assert output["companion"] == {
+        "available": False,
+        "version": "unknown",
+        "verified": False,
+        "capabilities": [],
+        "env_file": None,
+    }
+
+
+def test_run_waveforms_flag_requests_postprocessing(tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    class StubSimulator:
+        def run_simulation(self, netlist, options):
+            captured.update(options)
+            return SimulationResult(
+                status=ExecutionStatus.SUCCESS,
+                data={},
+                errors=[],
+                warnings=[],
+                metadata={},
+            )
+
+    monkeypatch.setattr(
+        cli.PrimeSimSimulator,
+        "from_env",
+        lambda **overrides: StubSimulator(),
+    )
+    assert cli.main(["run", str(tmp_path / "tb.sp"), "--waveforms"]) == 0
+    assert captured["parse_waveforms"] is True
+    assert json.loads(capsys.readouterr().out)["status"] == "SUCCESS"

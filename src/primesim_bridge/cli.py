@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from . import _companion
 from . import runner as runner_module
 from .argv import PRO_MODES, build_primesim_argv, primesim_mode_args
 from .parsers import (
@@ -60,6 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--log", dest="log_file")
     run_parser.add_argument("--remote")
     run_parser.add_argument("--timeout", type=int, default=3600)
+    run_parser.add_argument("--waveforms", action="store_true")
     run_parser.add_argument("--dry-run", action="store_true")
 
     parse_parser = subparsers.add_parser("parse")
@@ -108,6 +110,7 @@ def _run(args: argparse.Namespace) -> int:
         "waveform_format": args.waveform_format,
         "log_file": args.log_file,
         "prefix": args.prefix,
+        "parse_waveforms": args.waveforms,
     }
     result = simulator.run_simulation(
         Path(args.netlist), {key: value for key, value in options.items() if value is not None}
@@ -174,10 +177,21 @@ def _parse(args: argparse.Namespace) -> int:
 
 
 def _status() -> int:
+    companion = _companion.companion_info()
+    companion_env_file = _companion.env_file()
     report: dict[str, Any] = {
         "primesim": shutil.which("primesim"),
         "env_set": [name for name in STATUS_ENV_VARS if name in os.environ],
         "license_tokens": [],
+        "companion": {
+            "available": companion.available,
+            "version": companion.version,
+            "verified": companion.verified,
+            "capabilities": sorted(companion.capabilities),
+            "env_file": (
+                str(companion_env_file) if companion_env_file is not None else None
+            ),
+        },
     }
     if shutil.which("lmstat") is not None:
         try:
