@@ -24,6 +24,8 @@ from .runner import PrimeSimSimulator, RemoteSpec
 
 
 STATUS_ENV_VARS = (
+    "PSB_REMOTE_HOST",
+    "PSB_REMOTE_USER",
     "VB_PRIMESIM_BIN",
     "VB_SYNOPSYS_SETUP",
     "VB_SYNOPSYS_SETUP_SHELL",

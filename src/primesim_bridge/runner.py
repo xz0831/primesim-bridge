@@ -95,8 +95,16 @@ class PrimeSimSimulator:
         binary = os.environ.get("VB_PRIMESIM_BIN")
         setup = os.environ.get("VB_SYNOPSYS_SETUP")
         setup_shell = os.environ.get("VB_SYNOPSYS_SETUP_SHELL")
-        remote_host = os.environ.get("VB_REMOTE_HOST", "")
-        remote_user = os.environ.get("VB_REMOTE_USER")
+        # PSB_REMOTE_HOST shields against VB_REMOTE_HOST leaking from a shared
+        # virtuoso-bridge .env (LSF sites use direct-TCP Virtuoso bridging with no
+        # SSH to compute nodes — an exported VB_REMOTE_HOST there would wrongly
+        # push PrimeSim runs into SSH remote mode). Presence wins over value: an
+        # EMPTY PSB_REMOTE_HOST explicitly forces local mode.
+        if "PSB_REMOTE_HOST" in os.environ:
+            remote_host = os.environ["PSB_REMOTE_HOST"]
+        else:
+            remote_host = os.environ.get("VB_REMOTE_HOST", "")
+        remote_user = os.environ.get("PSB_REMOTE_USER") or os.environ.get("VB_REMOTE_USER")
         if binary:
             values["binary"] = binary
         if setup:

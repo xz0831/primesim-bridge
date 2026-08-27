@@ -86,6 +86,37 @@ Workflow handoff from the **virtuoso** skill: export the schematic netlist with 
 `si` batch netlister in HSPICE format — that is PrimeSim's native dialect — then run
 it here. No netlist translation is involved.
 
+## LSF / shared-filesystem sites (no SSH to compute nodes)
+
+Many EDA sites run tools on LSF compute nodes that users cannot SSH into (Virtuoso
+there is bridged via direct TCP, e.g. a site `bridge_setup` layer). In that topology
+do NOT use this bridge's SSH remote mode at all — run in **local mode on a
+submission-capable host** over the shared filesystem:
+
+- The Virtuoso→PrimeSim handoff still works unchanged: `si` writes the HSPICE netlist
+  to the shared FS and this bridge reads it from the same paths.
+- LSF enters through the `binary` parameter — point it at a **synchronous** site
+  wrapper (verified pattern; a masking variant is exercised in `tests/test_lsf_pattern.py`):
+
+  ```sh
+  #!/bin/sh
+  # bsub_primesim.sh — synchronous LSF submission wrapper
+  trap 'test -n "$LSB_JOBID" && bkill "$LSB_JOBID" 2>/dev/null' INT TERM
+  exec bsub -I -q normal -J primesim_bridge primesim "$@"
+  ```
+
+  `bsub -I`/`-K` preserve the tool's exit code; PrimeSim's own `-np lsf` /
+  `-mt lsf` flags can additionally be passed via `extra_args`.
+- If the site path involves `-wait`-style submission (exit code always 0), pass
+  `options={"is_parallel_wait": True}` so classification uses the log — without it a
+  masked failure degrades to PARTIAL at best.
+- Shield against env leakage from a shared virtuoso-bridge `.env`: an exported
+  `VB_REMOTE_HOST` would push this bridge into SSH mode. Set `PSB_REMOTE_HOST=`
+  (empty) to force local mode regardless; `PSB_REMOTE_HOST/PSB_REMOTE_USER` take
+  precedence over `VB_*` when both exist.
+- Async submit-and-poll (`bsub` + `bjobs`) is NOT implemented — keep submissions
+  synchronous, or build the polling in the site wrapper.
+
 ## Gotchas (verified in our tests unless marked)
 
 - Remote `binary` paths must be ABSOLUTE: execution is `cd <run_dir> && <binary> ...`,
