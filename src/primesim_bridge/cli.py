@@ -69,6 +69,12 @@ def _parser() -> argparse.ArgumentParser:
     parse_parser = subparsers.add_parser("parse")
     parse_parser.add_argument("prefix")
 
+    waveview_parser = subparsers.add_parser("waveview")
+    waveview_parser.add_argument("prefix")
+    waveview_parser.add_argument("--deck", help="netlist to mine .probe/.print signals from")
+    waveview_parser.add_argument("--signals", nargs="*", default=None)
+    waveview_parser.add_argument("--no-session", action="store_true")
+
     subparsers.add_parser("status")
     return parser
 
@@ -212,12 +218,44 @@ def _status() -> int:
     return 0
 
 
+def _waveview(args: argparse.Namespace) -> int:
+    from primesim_bridge.waveview import write_waveview_script
+
+    deck_text = ""
+    if args.deck:
+        deck_path = Path(args.deck)
+        if deck_path.is_file():
+            deck_text = deck_path.read_text(errors="replace")
+    outcome = write_waveview_script(
+        Path(args.prefix),
+        deck_text=deck_text,
+        signals=args.signals,
+        save_session=not args.no_session,
+    )
+    print(
+        json.dumps(
+            {
+                "script": str(outcome["script"]) if outcome["script"] else None,
+                "session": str(outcome["session"]) if outcome["session"] else None,
+                "fsdb_files": [str(p) for p in outcome["fsdb_files"]],
+                "signals": outcome["signals"],
+                "launch": outcome["launch"],
+                "warnings": outcome["warnings"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if outcome["script"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "run":
         return _run(args)
     if args.command == "parse":
         return _parse(args)
+    if args.command == "waveview":
+        return _waveview(args)
     return _status()
 
 

@@ -281,6 +281,32 @@ class PrimeSimSimulator:
             _merge_unique(result.warnings, [f"waveform parsing failed: {exc}"])
         return result
 
+    @staticmethod
+    def _postprocess_waveview(
+        result: SimulationResult, prefix: Path, netlist: Path, requested: bool
+    ) -> SimulationResult:
+        """Generate the WaveView ACE handoff script (human waveform handoff)."""
+        if not requested:
+            return result
+        try:
+            from primesim_bridge.waveview import write_waveview_script
+
+            try:
+                deck_text = netlist.read_text(errors="replace")
+            except OSError:
+                deck_text = ""
+            outcome = write_waveview_script(prefix, deck_text=deck_text)
+            _merge_unique(result.warnings, outcome["warnings"])
+            result.metadata["waveview"] = {
+                "script": str(outcome["script"]) if outcome["script"] else None,
+                "session": str(outcome["session"]) if outcome["session"] else None,
+                "signals": outcome["signals"],
+                "launch": outcome["launch"],
+            }
+        except Exception as exc:
+            _merge_unique(result.warnings, [f"waveview script generation failed: {exc}"])
+        return result
+
     def run_simulation(
         self, netlist: Path, options: dict[str, Any] | None = None
     ) -> SimulationResult:
@@ -303,10 +329,12 @@ class PrimeSimSimulator:
         log_value = selected.get("log_file")
         waveform_format = selected.get("waveform_format")
         parse_waveforms = selected.get("parse_waveforms") is True
+        waveview_script = selected.get("waveview_script") is True
 
         def finish_result(**kwargs: Any) -> SimulationResult:
             result = self._finish_result(**kwargs)
-            return self._postprocess_waveforms(result, prefix, parse_waveforms)
+            result = self._postprocess_waveforms(result, prefix, parse_waveforms)
+            return self._postprocess_waveview(result, prefix, netlist, waveview_script)
 
         if self.remote is None:
             include_destinations: list[Path] = []

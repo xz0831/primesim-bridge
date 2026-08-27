@@ -69,6 +69,7 @@ def directives(deck, afiles):
         "measure": [],
         "dc_fail": False,
         "no_artifacts": False,
+        "fsdb": False,
     }
     for line in view.splitlines():
         match = DIRECTIVE.match(line)
@@ -82,7 +83,7 @@ def directives(deck, afiles):
             selected[key] = value
         elif key in {"log", "measure"}:
             selected[key].append(value or "")
-        elif key in {"dc_fail", "no_artifacts"}:
+        elif key in {"dc_fail", "no_artifacts", "fsdb"}:
             selected[key] = True
     return selected
 
@@ -177,6 +178,9 @@ def main(arguments):
         )
         with open(prefix + ".ic", "w", encoding="utf-8"):
             pass
+        if selected["fsdb"]:
+            with open(prefix + ".fsdb", "w", encoding="utf-8"):
+                pass
 
     sleep_after = number(selected["sleep"], 0.0)
     if sleep_after > 0:

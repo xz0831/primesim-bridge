@@ -117,6 +117,28 @@ submission-capable host** over the shared filesystem:
 - Async submit-and-poll (`bsub` + `bjobs`) is NOT implemented — keep submissions
   synchronous, or build the polling in the site wrapper.
 
+## WaveView handoff (human waveform review)
+
+The agent judges from scalars; humans review waveforms in Synopsys WaveView. The
+bridge automates that handoff without ever hand-writing the (undocumented) `.sx`
+session format — it emits a documented ACE (Tcl) script and lets WaveView create
+the session itself:
+
+```bash
+primesim-bridge waveview runs/tb/tb --deck tb.sp   # or: options={"waveview_script": True}
+# → runs/tb/tb_waves.tcl  (opens FSDB, displays .probe'd signals, saves tb.sx)
+wv -k -ace_gui runs/tb/tb_waves.tcl                # first time (generates tb.sx)
+wv -x runs/tb/tb.sx                                # reopen the same run
+wv -y runs/tb/tb.sx runs/tb_2/tb.fsdb              # re-apply layout to a NEW run
+```
+
+Signal selection: `--signals` list → else `.probe`/`.print` mined from the deck
+(explicit paths preferred — huge FSDBs load scopes lazily) → else file-open only.
+Sessions are saved with `-relpath` for shared-filesystem portability. Whether a
+generated script opens in a licensed WaveView is the one on-site check remaining
+(G2-class); generation itself is offline-tested. Default FSDB waveform output is
+untouched by this bridge, so ad-hoc `wv run.fsdb` habits keep working.
+
 ## Gotchas (verified in our tests unless marked)
 
 - Remote `binary` paths must be ABSOLUTE: execution is `cd <run_dir> && <binary> ...`,
