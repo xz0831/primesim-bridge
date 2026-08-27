@@ -36,14 +36,14 @@ entries through `PYTHONPATH`; no network or package installation was used. A tem
 available. The exact criterion 1 invocation was:
 
 ```sh
-PSB_DEPS=/Users/rick/.cache/uv/archive-v0/nWhO1PiKgIG07K01:/Users/rick/.cache/uv/archive-v0/tLF7JnNkAm7m-pSX:/Users/rick/.cache/uv/archive-v0/IOycwRUvPOgWD6Jl:/Users/rick/.cache/uv/archive-v0/MQwQl_7nu0LL24c3:/Users/rick/.cache/uv/archive-v0/s8FMujIdIDbRzwyo:/Users/rick/Library/Python/3.9/lib/python/site-packages
+PSB_DEPS=<local package-cache paths for pydantic+pytest and their deps>
 PATH="/tmp/psb-g1-bin:$PATH" PYTHONPATH="src:$PSB_DEPS" python -m pytest tests/ -q
 ```
 
 The exact criterion 4 invocation was:
 
 ```sh
-PSB_DEPS=/Users/rick/.cache/uv/archive-v0/nWhO1PiKgIG07K01:/Users/rick/.cache/uv/archive-v0/tLF7JnNkAm7m-pSX:/Users/rick/.cache/uv/archive-v0/IOycwRUvPOgWD6Jl:/Users/rick/.cache/uv/archive-v0/MQwQl_7nu0LL24c3:/Users/rick/.cache/uv/archive-v0/s8FMujIdIDbRzwyo:/Users/rick/Library/Python/3.9/lib/python/site-packages
+PSB_DEPS=<local package-cache paths for pydantic+pytest and their deps>
 PATH="/tmp/psb-g1-bin:$PATH" PYTHONPATH="src:$PSB_DEPS" PSB_NO_COMPANION=1 python -m pytest tests/ -q
 ```
 
@@ -92,7 +92,7 @@ index, or ref-writing workaround was attempted.
   fixing one test-isolation defect ONLY reproducible with the real package installed:
   cached real submodules in `sys.modules` leaked through the stubbed parent in
   `install_stub_modules` (now purges `virtuoso_bridge*` first).
-- Live-SSH tier (host: studio2, macOS, /usr/bin/python3 3.9.6): 20 passed — both the
+- Live-SSH tier (host: a macOS cluster node, /usr/bin/python3 3.9.6): 20 passed — both the
   OpenSSH subprocess path (validating sanctioned amendments A/B on a real host) and the
   companion SSHRunner path (round-trip incl. merge-survival, fake E2E) — after fixing a
   second live-only test defect: the fake's remote binary path must be ABSOLUTE because
