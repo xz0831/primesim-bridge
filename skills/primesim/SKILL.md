@@ -108,6 +108,26 @@ Workflow handoff from the **virtuoso** skill: export the schematic netlist with 
 `si` batch netlister in HSPICE format — that is PrimeSim's native dialect — then run
 it here. No netlist translation is involved.
 
+## Site wrappers (`*_sub`-style launchers)
+
+Many sites expose every tool only through wrapper launchers. The bridge takes
+wrappers everywhere a binary is referenced — no code changes:
+
+```bash
+export VB_PRIMESIM_BIN=primesim_sub   # primesim engine (spice/pro)
+export VB_HSPICE_BIN=hspice_sub       # hspice engine — use the real site name
+export VB_XA_BIN=xa_sub               # xa engine
+export PSB_WV_BIN=sx_sub              # WaveView launch hints (waveview command)
+```
+
+(`--binary` on the CLI overrides per run.) Before relying on a wrapper, check
+two behaviors once: does it BLOCK until the job finishes (synchronous — what
+the bridge assumes), and does it FORWARD the tool's exit code? A wrapper that
+always returns 0 needs `options={"is_parallel_wait": True}` so classification
+falls back to the log. Live-verified example: WaveView ACE batch
+(`sx_sub -ace_no_gui script.tcl`) incl. `sx_export_range` + `sx_export_pwl
+<outfile> <signal>` worked as-is through a site wrapper (2026-08-28).
+
 ## LSF / shared-filesystem sites (no SSH to compute nodes)
 
 Many EDA sites run tools on LSF compute nodes that users cannot SSH into (Virtuoso

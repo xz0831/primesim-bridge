@@ -21,6 +21,7 @@ check (one command on site); generation itself is fully offline-testable.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -125,10 +126,12 @@ def write_waveview_script(
     session = prefix.with_suffix(".sx") if save_session else None
     script_path = prefix.parent / f"{prefix.name}_waves.tcl"
     script_path.write_text(emit_ace_script(fsdb, sigs, session))
-    launch = [f"wv -k -ace_gui {script_path}"]
+    # Sites commonly launch WaveView through a wrapper (e.g. sx_sub) — honor it.
+    wv = os.environ.get("PSB_WV_BIN", "wv")
+    launch = [f"{wv} -k -ace_gui {script_path}"]
     if session is not None:
-        launch.append(f"wv -x {session}")
-        launch.append(f"wv -y {session} <new_run>.fsdb")
+        launch.append(f"{wv} -x {session}")
+        launch.append(f"{wv} -y {session} <new_run>.fsdb")
     return {
         "script": script_path,
         "session": session,

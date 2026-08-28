@@ -142,3 +142,17 @@ def test_run_option_without_fsdb_warns(tmp_path, fake_primesim_path):
     ).run_simulation(deck, {"waveview_script": True})
     assert result.metadata["waveview"]["script"] is None
     assert "no .fsdb waveform files found for this prefix" in result.warnings
+
+
+def test_launch_hints_honor_wv_wrapper_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("PSB_WV_BIN", "sx_sub")
+    (tmp_path / "tb.fsdb").write_text("")
+    outcome = write_waveview_script(tmp_path / "tb", deck_text=".probe tran v(out)\n.end\n")
+    assert all(cmd.startswith("sx_sub ") for cmd in outcome["launch"])
+
+
+def test_launch_hints_default_to_wv(tmp_path, monkeypatch):
+    monkeypatch.delenv("PSB_WV_BIN", raising=False)
+    (tmp_path / "tb.fsdb").write_text("")
+    outcome = write_waveview_script(tmp_path / "tb", deck_text="")
+    assert outcome["launch"][0].startswith("wv ")
